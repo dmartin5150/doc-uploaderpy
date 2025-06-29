@@ -32,7 +32,7 @@ def enhance_contrast(pil_image, factor=2.0):
 
 def build_prompt(text: str, prompt_type: str) -> str:
     if prompt_type == "pdf":
-        prompt = f"""
+       prompt = f"""
 You are extracting structured data from a PDF medical referral document.
 
 IMPORTANT INSTRUCTIONS:
@@ -42,10 +42,16 @@ IMPORTANT INSTRUCTIONS:
 - Format phone numbers as (###) ###-####.
 - Format DOB as MM/DD/YYYY.
 - If fields are missing, return empty strings.
+- Extract all insurance entries listed for the patient. Each insurance entry should include:
+    - type: the insurance type label (e.g., "Med Primary", "Med Secondary", etc.)
+    - plan: the insurance plan name (e.g., "MEDICARE-FL (MEDICARE)")
+    - insurance_number: the number that follows "Insurance # :"
+- The "insurance" field must be an array of objects in the JSON response.
+- If no insurance is present, return an empty array for "insurance".
 - DO NOT include any comments or explanations before or after the JSON.
 - In the header, there is a Patient: followed by a number and the patient's name. Use the number as the MRN.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON in this format:
 
 {{
   "practice_name": "",
@@ -58,12 +64,20 @@ Return ONLY valid JSON:
   "city_state_zip": "",
   "home_phone": "",
   "work_phone": "",
-  "mobile_phone": ""
+  "mobile_phone": "",
+  "insurance": [
+    {{
+      "type": "",
+      "plan": "",
+      "insurance_number": ""
+    }}
+  ]
 }}
 
 Text to analyze:
 {text}
 """
+
     else:
         prompt = f"""
 You are extracting structured data from a scanned TIFF or image medical referral document.
@@ -157,7 +171,6 @@ def call_ollama(text: str, prompt_type: str) -> dict:
 
     parsed = extract_json_from_string(content)
     return parsed
-
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
     contents = await file.read()
@@ -176,7 +189,6 @@ async def upload(file: UploadFile = File(...)):
             if len(text_tesseract.strip()) < 10:
                 raise ValueError("PDF text empty")
         except Exception as e:
-            print("PyMuPDF failed, falling back to OCR:", e)
             images = convert_from_bytes(contents, dpi=300)
             img = images[0]
             img = enhance_contrast(img)
@@ -193,12 +205,7 @@ async def upload(file: UploadFile = File(...)):
     if not combined_text.strip():
         return JSONResponse(content={"error": "No text found in document."})
 
-    print("--- OCR Output Snippet ---")
-    print(combined_text[:500])
-
     extracted = call_ollama(combined_text, prompt_type)
-    print("--- Ollama Extraction Result ---")
-    print(extracted)
 
     if "error" in extracted:
         return JSONResponse(content={"error": extracted["error"], "details": extracted})
@@ -208,7 +215,8 @@ async def upload(file: UploadFile = File(...)):
         expected_keys = [
             "practice_name", "date", "patient_name", "mrn",
             "dob", "sex", "address", "city_state_zip",
-            "home_phone", "work_phone", "mobile_phone"
+            "home_phone", "work_phone", "mobile_phone",
+            "insurance"
         ]
     else:
         expected_keys = [
@@ -219,6 +227,11 @@ async def upload(file: UploadFile = File(...)):
 
     clean_data = {key: extracted.get(key, "") for key in expected_keys}
 
+    # Make sure insurance is always an array
+    if prompt_type == "pdf":
+        if not isinstance(clean_data.get("insurance"), list):
+            clean_data["insurance"] = []
+
     # Normalize date fields
     for date_field in ["date", "dob", "referral_date"]:
         if date_field in clean_data and clean_data[date_field]:
@@ -228,6 +241,14 @@ async def upload(file: UploadFile = File(...)):
     for phone_field in ["home_phone", "work_phone", "mobile_phone"]:
         if phone_field in clean_data and clean_data[phone_field]:
             clean_data[phone_field] = normalize_phone(clean_data[phone_field])
+
+    # FINAL print of the payload only
+    print("--- FINAL JSON RESPONSE ---")
+    print({
+        "file_type": prompt_type,
+        "type": "referral",
+        "data": clean_data
+    })
 
     return JSONResponse(content={
         "file_type": prompt_type,
