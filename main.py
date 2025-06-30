@@ -173,6 +173,7 @@ def call_ollama(text: str, prompt_type: str) -> dict:
     return parsed
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
+    print("Received file:", file.filename)
     contents = await file.read()
     filename = file.filename.lower()
 
